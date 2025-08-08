@@ -4,11 +4,21 @@
 #include <string.h>
 #include "hardware/i2c.h"
 #include "lib/ssd1306.h"
+#include "pico/binary_info.h"
 
+//display 
 #define I2C_PORT i2c1
 #define I2C_SDA 14
 #define I2C_SCL 15
 #define ENDERECO 0x3C
+// Endereço padrão do MPU6050
+static int addr = 0x68;
+
+// Definição dos pinos I2C para o MPU6050
+#define I2C_PORT_MPU i2c0                 // I2C0 usa pinos 0 e 1
+#define I2C_SDA_MPU 0
+#define I2C_SCL_MPU 1
+
 
 ssd1306_t ssd;
 // ============================================================================
@@ -184,6 +194,53 @@ void lora_send_packet(const char* message) {
     
     printf("Pacote enviado: '%s'\n", message);
 }
+// Função para resetar e inicializar o MPU6050
+static void mpu6050_reset()
+{
+    // Dois bytes para reset: primeiro o registrador, segundo o dado
+    uint8_t buf[] = {0x6B, 0x80};
+    i2c_write_blocking(I2C_PORT_MPU, addr, buf, 2, false);
+    sleep_ms(100); // Aguarda reset e estabilização
+
+    // Sai do modo sleep (registrador 0x6B, valor 0x00)
+    buf[1] = 0x00;
+    i2c_write_blocking(I2C_PORT_MPU, addr, buf, 2, false);
+    sleep_ms(10); // Aguarda estabilização após acordar
+}
+
+// Função para ler dados crus do acelerômetro, giroscópio e temperatura
+static void mpu6050_read_raw(int16_t accel[3], int16_t gyro[3], int16_t *temp)
+{
+    uint8_t buffer[6];
+
+    // Lê aceleração a partir do registrador 0x3B (6 bytes)
+    uint8_t val = 0x3B;
+    i2c_write_blocking(I2C_PORT_MPU, addr, &val, 1, true);
+    i2c_read_blocking(I2C_PORT_MPU, addr, buffer, 6, false);
+
+    for (int i = 0; i < 3; i++)
+    {
+        accel[i] = (buffer[i * 2] << 8) | buffer[(i * 2) + 1];
+    }
+
+    // Lê giroscópio a partir do registrador 0x43 (6 bytes)
+    val = 0x43;
+    i2c_write_blocking(I2C_PORT_MPU, addr, &val, 1, true);
+    i2c_read_blocking(I2C_PORT_MPU, addr, buffer, 6, false);
+
+    for (int i = 0; i < 3; i++)
+    {
+        gyro[i] = (buffer[i * 2] << 8) | buffer[(i * 2) + 1];
+    }
+
+    // Lê temperatura a partir do registrador 0x41 (2 bytes)
+    val = 0x41;
+    i2c_write_blocking(I2C_PORT_MPU, addr, &val, 1, true);
+    i2c_read_blocking(I2C_PORT_MPU, addr, buffer, 2, false);
+
+    *temp = (buffer[0] << 8) | buffer[1];
+}
+
 
 // ============================================================================
 // == Função Principal ========================================================
@@ -200,6 +257,19 @@ int main() {
     ssd1306_init(&ssd, WIDTH, HEIGHT, false, ENDERECO, I2C_PORT);
     ssd1306_config(&ssd);
     ssd1306_send_data(&ssd);
+
+    // Inicialização da I2C do MPU6050
+    i2c_init(I2C_PORT_MPU, 400 * 1000);
+    gpio_set_function(I2C_SDA_MPU, GPIO_FUNC_I2C);
+    gpio_set_function(I2C_SCL_MPU, GPIO_FUNC_I2C);
+    gpio_pull_up(I2C_SDA_MPU);
+    gpio_pull_up(I2C_SCL_MPU);
+
+    // Declara os pinos como I2C na Binary Info
+    bi_decl(bi_2pins_with_func(I2C_SDA_MPU, I2C_SCL_MPU, GPIO_FUNC_I2C));
+    mpu6050_reset();
+
+    int16_t aceleracao[3], gyro[3], temp;
 
     stdio_init_all();
     sleep_ms(2000); 
@@ -237,20 +307,35 @@ int main() {
     char message_buffer[50];
 
     while (1) {
+        // Leitura dos dados de aceleração, giroscópio e temperatura
+        mpu6050_read_raw(aceleracao, gyro, &temp);
+
+        // Conversão para unidade de 'g'
+        float ax = aceleracao[0] / 16384.0f;
+        float ay = aceleracao[1] / 16384.0f;
+         // Montagem das strings para o display
+        char acelx[20];
+        char acely[20];
+
+        
+        snprintf(acelx,  sizeof(acelx),  "%5.1f", ax);
+        snprintf(acely, sizeof(acely), "%5.1f", ay);
         ssd1306_fill(&ssd, 0); // limpa o display
-        ssd1306_draw_string(&ssd, "Cont. acesso", 15, 4);
-        ssd1306_draw_string(&ssd, "Max: 8 pessoas", 7, 13);
+        ssd1306_draw_string(&ssd, "Acel. X", 18, 4);
+        ssd1306_draw_string(&ssd, acelx, 18, 13);         // Exibe acel x
+        ssd1306_draw_string(&ssd, "Acel. Y", 18, 41);
+        ssd1306_draw_string(&ssd, acely, 18, 50);         // Exibe acel y
         ssd1306_rect(&ssd, 3, 3, 122, 60, 1, 0); // Desenha um retângulo
-        ssd1306_line(&ssd, 3, 22, 123, 22, 1);   // Desenha uma linha
+        //ssd1306_line(&ssd, 3, 22, 123, 22, 1);   // Desenha uma linha
         ssd1306_send_data(&ssd);
         // Monta a mensagem a ser enviada
-        snprintf(message_buffer, sizeof(message_buffer), "Ola do Pico! Cont: %d", counter);
-        
+        //snprintf(message_buffer, sizeof(message_buffer), "Ola do Pico! Cont: %d", counter);
+        snprintf(message_buffer, sizeof(message_buffer), "AcelX: %.2f, AcelY: %.2f", ax, ay);
         // Envia o pacote
-        lora_send_packet(message_buffer);
-        
-        counter++;
-        sleep_ms(5000); // Espera 5 segundos antes de enviar o próximo pacote
+        //lora_send_packet(message_buffer);
+        //counter++;
+        sleep_ms(200);
+        //sleep_ms(5000); // Espera 5 segundos antes de enviar o próximo pacote
     }
 
     return 0;
