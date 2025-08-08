@@ -1,0 +1,1 @@
+# Sensor_aceleracao_Lora
